@@ -151,7 +151,7 @@ Subtitle text to analyze:
 Please format your response in a clear, structured way.`;
 
             const response = await axios.post(this.openrouterApiUrl, {
-                model: "anthropic/claude-3.5-sonnet",
+                model: "google/gemini-pro-1.5",
                 messages: [
                     {
                         role: "system",
