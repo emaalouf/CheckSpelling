@@ -2,24 +2,63 @@ const fs = require('fs-extra');
 const path = require('path');
 const axios = require('axios');
 const chalk = require('chalk');
+const crypto = require('crypto');
+
+// Semaphore class to control concurrency
+class Semaphore {
+    constructor(max) {
+        this.max = max;
+        this.current = 0;
+        this.waiting = [];
+    }
+
+    acquire() {
+        return new Promise((resolve) => {
+            if (this.current < this.max) {
+                this.current++;
+                resolve(() => this.release());
+            } else {
+                this.waiting.push(() => {
+                    this.current++;
+                    resolve(() => this.release());
+                });
+            }
+        });
+    }
+
+    release() {
+        this.current--;
+        if (this.waiting.length > 0) {
+            const next = this.waiting.shift();
+            next();
+        }
+    }
+}
 
 class SubtitleChecker {
     constructor() {
         this.subtitlesDir = path.join(__dirname, 'subtitles');
+        this.stateFile = path.join(__dirname, '.subtitle-checker-state.json');
         this.openrouterApiUrl = 'https://openrouter.ai/api/v1/chat/completions';
         this.apiKey = process.env.OPENROUTER_API_KEY || '';
         this.results = [];
         this.fixedFiles = [];
+        this.maxConcurrency = parseInt(process.env.MAX_CONCURRENCY) || 3; // Process up to 3 files simultaneously
+        this.forceReprocess = process.argv.includes('--force') || process.argv.includes('-f');
+        this.state = {};
     }
 
     async init() {
         console.log(chalk.blue('🔍 Starting Subtitle Spell & Grammar Checker'));
-        console.log(chalk.gray('Using OpenRouter AI models for analysis\n'));
+        console.log(chalk.gray(`Using OpenRouter AI models with ${this.maxConcurrency} concurrent requests\n`));
 
         if (!this.apiKey) {
             console.log(chalk.yellow('⚠️  Warning: OPENROUTER_API_KEY environment variable not set.'));
             console.log(chalk.gray('Please set your OpenRouter API key: export OPENROUTER_API_KEY="your-api-key"\n'));
         }
+
+        // Load previous processing state
+        await this.loadState();
 
         // Check if subtitles directory exists
         if (!await fs.pathExists(this.subtitlesDir)) {
@@ -31,7 +70,63 @@ class SubtitleChecker {
         }
 
         await this.processVTTFiles();
+        await this.saveState();
         this.generateReport();
+    }
+
+    async loadState() {
+        try {
+            if (await fs.pathExists(this.stateFile)) {
+                this.state = await fs.readJson(this.stateFile);
+                console.log(chalk.gray(`📄 Loaded processing state for ${Object.keys(this.state).length} files`));
+            } else {
+                this.state = {};
+            }
+        } catch (error) {
+            console.log(chalk.yellow('⚠️  Could not load state file, starting fresh'));
+            this.state = {};
+        }
+    }
+
+    async saveState() {
+        try {
+            await fs.writeJson(this.stateFile, this.state, { spaces: 2 });
+        } catch (error) {
+            console.error(chalk.red('❌ Error saving state:'), error.message);
+        }
+    }
+
+    async getFileHash(filePath) {
+        try {
+            const content = await fs.readFile(filePath);
+            return crypto.createHash('md5').update(content).digest('hex');
+        } catch (error) {
+            return null;
+        }
+    }
+
+    async shouldProcessFile(filename, filePath) {
+        if (this.forceReprocess) {
+            return { should: true, reason: 'forced reprocessing' };
+        }
+
+        try {
+            const stats = await fs.stat(filePath);
+            const currentHash = await this.getFileHash(filePath);
+            const fileState = this.state[filename];
+
+            if (!fileState) {
+                return { should: true, reason: 'new file' };
+            }
+
+            if (fileState.hash !== currentHash) {
+                return { should: true, reason: 'file modified' };
+            }
+
+            return { should: false, reason: 'already processed and unchanged' };
+        } catch (error) {
+            return { should: true, reason: 'error checking file state' };
+        }
     }
 
     async processVTTFiles() {
@@ -46,13 +141,62 @@ class SubtitleChecker {
 
             console.log(chalk.green(`📁 Found ${vttFiles.length} VTT files to check:\n`));
 
+            // Check which files need processing
+            const filesToProcess = [];
+            const skippedFiles = [];
+
             for (const file of vttFiles) {
-                await this.checkVTTFile(file);
+                const filePath = path.join(this.subtitlesDir, file);
+                const shouldProcess = await this.shouldProcessFile(file, filePath);
+                
+                if (shouldProcess.should) {
+                    filesToProcess.push({ filename: file, reason: shouldProcess.reason });
+                } else {
+                    skippedFiles.push({ filename: file, reason: shouldProcess.reason });
+                }
             }
+
+            // Show processing plan
+            if (skippedFiles.length > 0) {
+                console.log(chalk.gray(`⏭️  Skipping ${skippedFiles.length} unchanged files:`));
+                for (const { filename, reason } of skippedFiles) {
+                    console.log(chalk.gray(`   • ${filename} (${reason})`));
+                }
+                console.log();
+            }
+
+            if (filesToProcess.length === 0) {
+                console.log(chalk.green('✨ All files are up to date! Use --force to reprocess all files.\n'));
+                return;
+            }
+
+            console.log(chalk.cyan(`🔄 Processing ${filesToProcess.length} files with ${this.maxConcurrency} concurrent requests:`));
+            for (const { filename, reason } of filesToProcess) {
+                console.log(chalk.cyan(`   • ${filename} (${reason})`));
+            }
+            console.log();
+
+            // Process files in parallel with controlled concurrency
+            await this.processFilesInParallel(filesToProcess.map(f => f.filename));
 
         } catch (error) {
             console.error(chalk.red('❌ Error reading subtitles directory:'), error.message);
         }
+    }
+
+    async processFilesInParallel(filenames) {
+        const semaphore = new Semaphore(this.maxConcurrency);
+        const promises = filenames.map(filename => 
+            semaphore.acquire().then(async (release) => {
+                try {
+                    await this.checkVTTFile(filename);
+                } finally {
+                    release();
+                }
+            })
+        );
+
+        await Promise.all(promises);
     }
 
     async checkVTTFile(filename) {
@@ -71,6 +215,14 @@ class SubtitleChecker {
 
             const analysis = await this.analyzeWithOpenRouter(subtitleText, filename);
             
+            // Update state
+            const fileHash = await this.getFileHash(filePath);
+            this.state[filename] = {
+                hash: fileHash,
+                lastProcessed: new Date().toISOString(),
+                hasErrors: analysis.corrections && analysis.corrections.length > 0
+            };
+            
             // If analysis was successful and contains corrections, apply them
             if (analysis.status === 'success' && analysis.corrections && analysis.corrections.length > 0) {
                 const fixResult = await this.applyCorrections(filePath, content, analysis.corrections, filename);
@@ -81,7 +233,10 @@ class SubtitleChecker {
                     fixResult
                 });
                 
-                if (fixResult.success) {
+                // Update hash after corrections
+                if (fixResult.success && fixResult.changesCount > 0) {
+                    this.state[filename].hash = await this.getFileHash(filePath);
+                    this.state[filename].hasErrors = false;
                     console.log(chalk.green(`   ✅ Analysis complete - ${fixResult.changesCount} corrections applied\n`));
                 } else {
                     console.log(chalk.green(`   ✅ Analysis complete\n`));
@@ -182,7 +337,7 @@ Subtitle text to analyze:
 "${text}"`;
 
             const response = await axios.post(this.openrouterApiUrl, {
-                model: "openrouter/auto",
+                model: "deepseek/deepseek-r1-0528-qwen3-8b",
                 messages: [
                     {
                         role: "system",
@@ -398,7 +553,18 @@ function showUsage() {
     console.log(chalk.white('3. Run the checker:'));
     console.log(chalk.gray('   npm start'));
     console.log(chalk.gray('   # or'));
-    console.log(chalk.gray('   node subtitle-checker.js\n'));
+    console.log(chalk.gray('   node subtitle-checker.js'));
+    console.log(chalk.white('\n📈 Performance Options:'));
+    console.log(chalk.gray('   --force, -f              Force reprocess all files (ignore cache)'));
+    console.log(chalk.gray('   MAX_CONCURRENCY=N        Set concurrent processing limit (default: 3)'));
+    console.log(chalk.white('\n💡 Smart Features:'));
+    console.log(chalk.gray('   • Only processes new or modified files'));
+    console.log(chalk.gray('   • Parallel processing for faster execution'));
+    console.log(chalk.gray('   • State tracking to avoid duplicate work'));
+    console.log(chalk.gray('   • Automatic backup creation before corrections\n'));
+    console.log(chalk.white('Examples:'));
+    console.log(chalk.gray('   MAX_CONCURRENCY=5 node subtitle-checker.js    # Process 5 files at once'));
+    console.log(chalk.gray('   node subtitle-checker.js --force              # Reprocess all files\n'));
 }
 
 // Main execution
