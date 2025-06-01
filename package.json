@@ -4,6 +4,7 @@
   "main": "subtitle-checker.js",
   "scripts": {
     "start": "node subtitle-checker.js",
+    "local": "node subtitle-checker-local.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": ["subtitles", "spell-check", "grammar-check", "deepseek"],

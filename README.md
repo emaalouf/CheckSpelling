@@ -14,7 +14,8 @@ A Node.js application that automatically checks VTT subtitle files for spelling 
 ## Prerequisites
 
 - Node.js (version 14 or higher)
-- DeepSeek API key (sign up at [DeepSeek](https://www.deepseek.com/))
+- **For API version**: DeepSeek API key (sign up at [DeepSeek](https://www.deepseek.com/))
+- **For local version**: Ubuntu 22+ server with 8GB+ RAM (recommended)
 
 ## Installation
 
@@ -41,22 +42,49 @@ A Node.js application that automatically checks VTT subtitle files for spelling 
 
 ## Usage
 
-### Basic Usage
+### 🌐 API Version (Cloud)
 
-1. **Place your VTT files in the `subtitles` folder**
+1. **Set your DeepSeek API key**
+   ```bash
+   export DEEPSEEK_API_KEY="your-deepseek-api-key-here"
+   ```
+
+2. **Place your VTT files in the `subtitles` folder**
    ```bash
    mkdir -p subtitles
    # Copy your VTT files to the subtitles folder
    ```
 
-2. **Run the checker**
+3. **Run the checker**
    ```bash
    npm start
-   ```
-   
-   Or directly:
-   ```bash
+   # or
    node subtitle-checker.js
+   ```
+
+### 🏠 Local Version (No API Key Required)
+
+1. **Set up local DeepSeek (Ubuntu 22+ recommended)**
+   ```bash
+   chmod +x setup-local.sh
+   ./setup-local.sh
+   ```
+
+2. **Place your VTT files in the `subtitles` folder**
+
+3. **Run the local checker**
+   ```bash
+   npm run local
+   # or
+   ./run-local-checker.sh
+   # or
+   node subtitle-checker-local.js
+   ```
+
+4. **Optional: Use different models**
+   ```bash
+   export DEEPSEEK_MODEL="deepseek-coder:6.7b"
+   npm run local
    ```
 
 ### Command Line Options
