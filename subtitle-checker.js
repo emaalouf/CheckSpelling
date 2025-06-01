@@ -9,6 +9,7 @@ class SubtitleChecker {
         this.openrouterApiUrl = 'https://openrouter.ai/api/v1/chat/completions';
         this.apiKey = process.env.OPENROUTER_API_KEY || '';
         this.results = [];
+        this.fixedFiles = [];
     }
 
     async init() {
@@ -69,13 +70,30 @@ class SubtitleChecker {
             }
 
             const analysis = await this.analyzeWithOpenRouter(subtitleText, filename);
-            this.results.push({
-                filename,
-                analysis,
-                originalLength: subtitleText.length
-            });
-
-            console.log(chalk.green(`   ✅ Analysis complete\n`));
+            
+            // If analysis was successful and contains corrections, apply them
+            if (analysis.status === 'success' && analysis.corrections && analysis.corrections.length > 0) {
+                const fixResult = await this.applyCorrections(filePath, content, analysis.corrections, filename);
+                this.results.push({
+                    filename,
+                    analysis,
+                    originalLength: subtitleText.length,
+                    fixResult
+                });
+                
+                if (fixResult.success) {
+                    console.log(chalk.green(`   ✅ Analysis complete - ${fixResult.changesCount} corrections applied\n`));
+                } else {
+                    console.log(chalk.green(`   ✅ Analysis complete\n`));
+                }
+            } else {
+                this.results.push({
+                    filename,
+                    analysis,
+                    originalLength: subtitleText.length
+                });
+                console.log(chalk.green(`   ✅ Analysis complete\n`));
+            }
 
         } catch (error) {
             console.error(chalk.red(`   ❌ Error processing ${filename}:`), error.message);
@@ -138,20 +156,33 @@ class SubtitleChecker {
         }
 
         try {
-            const prompt = `Please analyze the following subtitle text for spelling and grammar mistakes. 
-Provide a detailed report including:
-1. Number of spelling errors found
-2. Number of grammar errors found  
-3. List of specific errors with suggestions for correction
-4. Overall assessment of the text quality
+            const prompt = `Please analyze the following subtitle text for spelling and grammar mistakes and provide corrections.
+
+IMPORTANT: Structure your response as JSON with this exact format:
+{
+  "summary": {
+    "spellingErrors": number,
+    "grammarErrors": number,
+    "overallQuality": "description"
+  },
+  "corrections": [
+    {
+      "original": "exact text to replace",
+      "corrected": "corrected text",
+      "type": "spelling|grammar",
+      "explanation": "brief explanation"
+    }
+  ],
+  "analysis": "detailed analysis text"
+}
+
+If no errors are found, return an empty corrections array.
 
 Subtitle text to analyze:
-"${text}"
-
-Please format your response in a clear, structured way.`;
+"${text}"`;
 
             const response = await axios.post(this.openrouterApiUrl, {
-                model: "google/gemini-pro-1.5",
+                model: "openrouter/auto",
                 messages: [
                     {
                         role: "system",
@@ -172,9 +203,30 @@ Please format your response in a clear, structured way.`;
                 timeout: 30000
             });
 
+            const responseContent = response.data.choices[0].message.content;
+            
+            // Try to parse JSON response
+            let parsedResponse;
+            try {
+                // Extract JSON from response if it's wrapped in markdown
+                const jsonMatch = responseContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+                const jsonString = jsonMatch ? jsonMatch[1] : responseContent;
+                parsedResponse = JSON.parse(jsonString);
+            } catch (parseError) {
+                console.log(chalk.yellow(`   ⚠️  Could not parse structured response, using raw analysis`));
+                return {
+                    status: 'success',
+                    analysis: responseContent,
+                    usage: response.data.usage,
+                    corrections: []
+                };
+            }
+
             return {
                 status: 'success',
-                analysis: response.data.choices[0].message.content,
+                analysis: parsedResponse.analysis || responseContent,
+                summary: parsedResponse.summary,
+                corrections: parsedResponse.corrections || [],
                 usage: response.data.usage
             };
 
@@ -188,6 +240,65 @@ Please format your response in a clear, structured way.`;
             return {
                 status: 'error',
                 message: error.message
+            };
+        }
+    }
+
+    async applyCorrections(filePath, originalContent, corrections, filename) {
+        try {
+            let modifiedContent = originalContent;
+            let changesCount = 0;
+            const appliedChanges = [];
+
+            console.log(chalk.cyan(`   🔧 Applying ${corrections.length} corrections to ${filename}...`));
+
+            // Apply corrections one by one
+            for (const correction of corrections) {
+                const originalText = correction.original;
+                const correctedText = correction.corrected;
+                
+                if (modifiedContent.includes(originalText)) {
+                    modifiedContent = modifiedContent.replace(originalText, correctedText);
+                    changesCount++;
+                    appliedChanges.push({
+                        original: originalText,
+                        corrected: correctedText,
+                        type: correction.type,
+                        explanation: correction.explanation
+                    });
+                    console.log(chalk.gray(`     • ${correction.type}: "${originalText}" → "${correctedText}"`));
+                }
+            }
+
+            if (changesCount > 0) {
+                // Create backup of original file
+                const backupPath = filePath.replace('.vtt', '.vtt.backup');
+                await fs.copy(filePath, backupPath);
+                
+                // Write corrected content
+                await fs.writeFile(filePath, modifiedContent, 'utf8');
+                
+                this.fixedFiles.push({
+                    filename,
+                    changesCount,
+                    appliedChanges,
+                    backupPath
+                });
+
+                console.log(chalk.green(`     ✅ ${changesCount} corrections applied, backup saved as ${path.basename(backupPath)}`));
+            }
+
+            return {
+                success: true,
+                changesCount,
+                appliedChanges
+            };
+
+        } catch (error) {
+            console.error(chalk.red(`     ❌ Error applying corrections to ${filename}:`), error.message);
+            return {
+                success: false,
+                error: error.message
             };
         }
     }
@@ -215,6 +326,29 @@ Please format your response in a clear, structured way.`;
                 console.log(chalk.yellow(`⏭️  Skipped: ${result.analysis.message}`));
             } else if (result.analysis.status === 'success') {
                 console.log(chalk.green('✅ Analysis Results:'));
+                
+                // Show summary if available
+                if (result.analysis.summary) {
+                    console.log(chalk.white(`📊 Summary:`));
+                    console.log(chalk.white(`   • Spelling errors: ${result.analysis.summary.spellingErrors || 0}`));
+                    console.log(chalk.white(`   • Grammar errors: ${result.analysis.summary.grammarErrors || 0}`));
+                    console.log(chalk.white(`   • Quality: ${result.analysis.summary.overallQuality || 'N/A'}`));
+                }
+                
+                // Show corrections applied
+                if (result.fixResult && result.fixResult.success && result.fixResult.changesCount > 0) {
+                    console.log(chalk.cyan(`\n🔧 Corrections Applied (${result.fixResult.changesCount}):`));
+                    for (const change of result.fixResult.appliedChanges) {
+                        console.log(chalk.white(`   • ${change.type}: "${change.original}" → "${change.corrected}"`));
+                        if (change.explanation) {
+                            console.log(chalk.gray(`     ${change.explanation}`));
+                        }
+                    }
+                } else if (result.analysis.corrections && result.analysis.corrections.length === 0) {
+                    console.log(chalk.green(`\n✨ No errors found - text is already correct!`));
+                }
+                
+                console.log(chalk.white(`\n📝 Detailed Analysis:`));
                 console.log(chalk.white(result.analysis.analysis));
                 
                 if (result.analysis.usage) {
@@ -232,6 +366,25 @@ Please format your response in a clear, structured way.`;
         console.log(chalk.green(`✅ Successfully analyzed: ${successCount} files`));
         console.log(chalk.red(`❌ Errors encountered: ${errorCount} files`));
         console.log(chalk.gray(`📁 Total files processed: ${this.results.length}`));
+
+        // Show summary of fixes
+        if (this.fixedFiles.length > 0) {
+            const totalCorrections = this.fixedFiles.reduce((sum, file) => sum + file.changesCount, 0);
+            console.log(chalk.cyan(`\n🔧 CORRECTIONS APPLIED`));
+            console.log(chalk.cyan('─'.repeat(25)));
+            console.log(chalk.white(`📝 Files corrected: ${this.fixedFiles.length}`));
+            console.log(chalk.white(`🔄 Total corrections: ${totalCorrections}`));
+            
+            console.log(chalk.gray('\n📋 Fixed files:'));
+            for (const fixedFile of this.fixedFiles) {
+                console.log(chalk.white(`   • ${fixedFile.filename}: ${fixedFile.changesCount} corrections`));
+                console.log(chalk.gray(`     Backup: ${path.basename(fixedFile.backupPath)}`));
+            }
+            
+            console.log(chalk.yellow('\n💡 Note: Original files have been backed up with .backup extension'));
+        } else {
+            console.log(chalk.green(`\n✨ No corrections needed - all files are already error-free!`));
+        }
     }
 }
 
