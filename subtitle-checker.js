@@ -6,18 +6,18 @@ const chalk = require('chalk');
 class SubtitleChecker {
     constructor() {
         this.subtitlesDir = path.join(__dirname, 'subtitles');
-        this.deepseekApiUrl = 'https://api.deepseek.com/v1/chat/completions';
-        this.apiKey = process.env.DEEPSEEK_API_KEY || '';
+        this.openrouterApiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+        this.apiKey = process.env.OPENROUTER_API_KEY || '';
         this.results = [];
     }
 
     async init() {
         console.log(chalk.blue('🔍 Starting Subtitle Spell & Grammar Checker'));
-        console.log(chalk.gray('Using DeepSeek V3 model for analysis\n'));
+        console.log(chalk.gray('Using OpenRouter AI models for analysis\n'));
 
         if (!this.apiKey) {
-            console.log(chalk.yellow('⚠️  Warning: DEEPSEEK_API_KEY environment variable not set.'));
-            console.log(chalk.gray('Please set your DeepSeek API key: export DEEPSEEK_API_KEY="your-api-key"\n'));
+            console.log(chalk.yellow('⚠️  Warning: OPENROUTER_API_KEY environment variable not set.'));
+            console.log(chalk.gray('Please set your OpenRouter API key: export OPENROUTER_API_KEY="your-api-key"\n'));
         }
 
         // Check if subtitles directory exists
@@ -68,7 +68,7 @@ class SubtitleChecker {
                 return;
             }
 
-            const analysis = await this.analyzeWithDeepSeek(subtitleText, filename);
+            const analysis = await this.analyzeWithOpenRouter(subtitleText, filename);
             this.results.push({
                 filename,
                 analysis,
@@ -129,7 +129,7 @@ class SubtitleChecker {
         return textLines.join(' ');
     }
 
-    async analyzeWithDeepSeek(text, filename) {
+    async analyzeWithOpenRouter(text, filename) {
         if (!this.apiKey) {
             return {
                 status: 'skipped',
@@ -150,8 +150,8 @@ Subtitle text to analyze:
 
 Please format your response in a clear, structured way.`;
 
-            const response = await axios.post(this.deepseekApiUrl, {
-                model: "deepseek-chat",
+            const response = await axios.post(this.openrouterApiUrl, {
+                model: "anthropic/claude-3.5-sonnet",
                 messages: [
                     {
                         role: "system",
@@ -179,7 +179,7 @@ Please format your response in a clear, structured way.`;
             };
 
         } catch (error) {
-            console.error(chalk.red(`   ❌ DeepSeek API error for ${filename}:`), error.message);
+            console.error(chalk.red(`   ❌ OpenRouter API error for ${filename}:`), error.message);
             
             if (error.response) {
                 console.error(chalk.red('   API Response:'), error.response.status, error.response.data);
@@ -239,8 +239,8 @@ Please format your response in a clear, structured way.`;
 function showUsage() {
     console.log(chalk.blue('📚 SUBTITLE CHECKER USAGE'));
     console.log(chalk.blue('═'.repeat(25)));
-    console.log(chalk.white('1. Set your DeepSeek API key:'));
-    console.log(chalk.gray('   export DEEPSEEK_API_KEY="your-api-key-here"'));
+    console.log(chalk.white('1. Set your OpenRouter API key:'));
+    console.log(chalk.gray('   export OPENROUTER_API_KEY="your-api-key-here"'));
     console.log(chalk.white('\n2. Place VTT files in the "subtitles" folder'));
     console.log(chalk.white('3. Run the checker:'));
     console.log(chalk.gray('   npm start'));
